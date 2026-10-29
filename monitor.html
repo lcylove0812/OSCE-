@@ -1,0 +1,394 @@
+<!doctype html>
+<html lang="zh-Hant-TW">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>OSCE 站位計時器</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@500;600;700&family=Noto+Sans+TC:wght@400;500;700&display=swap">
+<style>
+:root{padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+body{margin:0}
+[hidden]{display:none!important}
+
+/* Layout: bedside-monitor console — status bar, glowing segmented dial, live ECG sweep, minute blocks, controls.
+   Deliberate single dark look (patient-monitor screen). One signal color --c drives every glow and swaps by state. */
+:root {
+  --bg: #04080b;
+  --panel: #0a1318;
+  --grid: rgba(120, 200, 190, 0.06);
+  --fg: #e8f4f2;
+  --muted: #7f9a9a;
+  --line: #1b2c33;
+  --green: #36f5a2;
+  --amber: #ffb52e;
+  --red: #ff3d56;
+  --c: var(--green);
+  --font-body: "Noto Sans TC", "PingFang TC", "Microsoft JhengHei", system-ui, sans-serif;
+  --font-mono: "Chakra Petch", "Noto Sans TC", ui-monospace, monospace;
+  color-scheme: dark;
+}
+.state-warn { --c: var(--amber); }
+.state-end { --c: var(--red); }
+.state-idle { --c: var(--green); }
+
+html, body { height: 100%; }
+body {
+  background:
+    radial-gradient(ellipse at 50% 30%, color-mix(in srgb, var(--c) 9%, transparent), transparent 60%),
+    linear-gradient(var(--grid) 1px, transparent 1px) 0 0 / 24px 24px,
+    linear-gradient(90deg, var(--grid) 1px, transparent 1px) 0 0 / 24px 24px,
+    var(--bg);
+  color: var(--fg); font-family: var(--font-body);
+  padding-left: max(16px, env(safe-area-inset-left, 0px));
+  padding-right: max(16px, env(safe-area-inset-right, 0px));
+  padding-block: 14px 20px;
+  box-sizing: border-box;
+}
+body::after {
+  content: ""; position: fixed; inset: 0; pointer-events: none; z-index: 5;
+  box-shadow: inset 0 0 0 0 transparent; transition: box-shadow .4s;
+}
+.state-end::after { box-shadow: inset 0 0 120px 20px color-mix(in srgb, var(--red) 55%, transparent); }
+@media (prefers-reduced-motion: no-preference) {
+  .state-end::after { animation: alarm 1s ease-in-out infinite; }
+  .state-end .digits { animation: flash 1s steps(2, start) infinite; }
+}
+@keyframes alarm { 50% { box-shadow: inset 0 0 40px 4px color-mix(in srgb, var(--red) 25%, transparent); } }
+@keyframes flash { to { opacity: .3; } }
+
+.app { max-width: 540px; margin: 0 auto; display: flex; flex-direction: column; gap: 16px; }
+
+/* status bar */
+.bar {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  font: 600 12px var(--font-mono); letter-spacing: .14em; color: var(--muted); text-transform: uppercase;
+}
+.live { display: flex; align-items: center; gap: 8px; color: var(--c); }
+.live i { width: 9px; height: 9px; border-radius: 50%; background: var(--c); box-shadow: 0 0 10px var(--c); opacity: .35; transition: opacity .1s; }
+.live i.beat { opacity: 1; }
+.clock { font-variant-numeric: tabular-nums; }
+
+/* identity */
+.who {
+  display: grid; grid-template-columns: 1fr auto; gap: 4px 12px; align-items: end;
+  padding: 14px 16px; background: var(--panel); border: 1px solid var(--line); border-radius: 14px;
+}
+.field { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.field label { font: 600 11px var(--font-mono); letter-spacing: .16em; color: var(--muted); }
+.field input {
+  font: 700 21px/1.3 var(--font-body); color: var(--fg); background: transparent; border: none;
+  border-bottom: 1px dashed transparent; padding: 0; width: 100%; min-width: 0;
+}
+.field input.student { font-size: 17px; font-weight: 500; color: var(--c); }
+.field input:hover { border-bottom-color: var(--line); }
+.field input:focus { outline: none; border-bottom-color: var(--c); }
+.presets { display: flex; gap: 4px; grid-row: span 2; align-self: center; flex-direction: column; }
+.presets button {
+  font: 600 13px var(--font-mono); padding: 5px 10px; border-radius: 8px; cursor: pointer;
+  border: 1px solid var(--line); background: transparent; color: var(--muted);
+}
+.presets button[aria-pressed="true"] { border-color: var(--c); color: var(--c); box-shadow: 0 0 12px -2px var(--c); }
+.presets button:disabled { opacity: .35; cursor: not-allowed; }
+
+/* dial */
+.dial { position: relative; width: min(100%, 400px); aspect-ratio: 1; max-width: 100%; margin: 0 auto; }
+.dial svg { width: 100%; height: 100%; transform: rotate(-90deg); overflow: visible; }
+.seg-track { fill: none; stroke: var(--line); stroke-width: 14; }
+.seg-on { fill: none; stroke: var(--c); stroke-width: 14; filter: drop-shadow(0 0 6px var(--c)); transition: stroke .3s; }
+.inner { fill: none; stroke: color-mix(in srgb, var(--c) 25%, transparent); stroke-width: 1; }
+.warn-mark { stroke: var(--amber); stroke-width: 3; }
+.readout { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px; }
+.readout small { font: 600 12px var(--font-mono); letter-spacing: .2em; color: var(--muted); }
+.digits {
+  font: 600 clamp(62px, 19vw, 96px)/1 var(--font-mono); font-variant-numeric: tabular-nums;
+  color: var(--c); text-shadow: 0 0 18px color-mix(in srgb, var(--c) 70%, transparent), 0 0 2px var(--c);
+  letter-spacing: .02em;
+}
+.status {
+  margin-top: 6px; font: 700 15px var(--font-body); letter-spacing: .12em; padding: 5px 16px; border-radius: 999px;
+  color: var(--c); border: 1px solid color-mix(in srgb, var(--c) 50%, transparent);
+  background: color-mix(in srgb, var(--c) 10%, transparent);
+}
+.state-end .status { background: var(--red); color: #fff; border-color: var(--red); box-shadow: 0 0 24px var(--red); }
+
+/* ECG strip */
+.ecg {
+  position: relative; height: 84px; border-radius: 12px; overflow: hidden;
+  background: var(--panel); border: 1px solid var(--line);
+}
+.ecg canvas { width: 100%; height: 100%; display: block; }
+.ecg span { position: absolute; top: 8px; left: 12px; font: 600 11px var(--font-mono); letter-spacing: .16em; color: var(--muted); }
+.ecg b { position: absolute; top: 6px; right: 12px; font: 700 20px var(--font-mono); color: var(--c); font-variant-numeric: tabular-nums; }
+.ecg b em { font: 600 10px var(--font-mono); color: var(--muted); font-style: normal; letter-spacing: .14em; margin-left: 4px; }
+
+/* minute blocks */
+.blocks { display: grid; gap: 5px; }
+.blocks div { height: 10px; border-radius: 3px; background: var(--line); transition: background .3s, box-shadow .3s; }
+.blocks div.on { background: var(--green); box-shadow: 0 0 8px -1px var(--green); }
+.blocks div.last { outline: 1px solid color-mix(in srgb, var(--amber) 60%, transparent); outline-offset: 1px; }
+.blocks div.last.on { background: var(--amber); box-shadow: 0 0 10px var(--amber); }
+.state-end .blocks div { background: color-mix(in srgb, var(--red) 40%, var(--line)); }
+.legend { display: flex; justify-content: space-between; font: 600 11px var(--font-mono); letter-spacing: .12em; color: var(--muted); margin-top: -8px; }
+
+/* controls */
+.controls { display: grid; grid-template-columns: 1fr 2fr 1fr; gap: 10px; }
+.controls button {
+  font: 700 17px var(--font-body); padding: 17px 6px; border-radius: 14px; cursor: pointer;
+  border: 1px solid var(--line); background: var(--panel); color: var(--fg); transition: transform .08s;
+}
+.controls button:active { transform: scale(.97); }
+.controls .primary {
+  background: var(--c); border-color: var(--c); color: #031014; font-size: 20px; letter-spacing: .1em;
+  box-shadow: 0 0 28px -4px var(--c), inset 0 1px 0 rgba(255,255,255,.35);
+}
+button:focus-visible, input:focus-visible { outline: 2px solid var(--c); outline-offset: 3px; }
+
+.opts { display: flex; flex-wrap: wrap; gap: 8px 18px; font-size: 14px; color: var(--muted); }
+.opts label { display: flex; align-items: center; gap: 6px; cursor: pointer; }
+.opts input { accent-color: var(--green); width: 18px; height: 18px; }
+.note { font-size: 12px; color: var(--muted); line-height: 1.7; margin: 0; }
+</style>
+</head>
+<body>
+
+<div class="app">
+  <div class="bar">
+    <div class="live"><i id="dot"></i><span id="mode">STANDBY</span></div>
+    <div>OSCE · STATION TIMER</div>
+    <div class="clock" id="clock">--:--:--</div>
+  </div>
+
+  <div class="who">
+    <div class="field">
+      <label for="stationName">站別 STATION</label>
+      <input id="stationName" value="第 3 站 腹部身體檢查" maxlength="24">
+    </div>
+    <div class="presets" id="presets" role="group" aria-label="每站時間">
+      <button type="button" data-min="5">5′</button>
+      <button type="button" data-min="8" aria-pressed="true">8′</button>
+      <button type="button" data-min="10">10′</button>
+    </div>
+    <div class="field">
+      <label for="studentName">學員 CANDIDATE</label>
+      <input id="studentName" class="student" value="學員 A" maxlength="16">
+    </div>
+  </div>
+
+  <div class="dial">
+    <svg viewBox="0 0 220 220" aria-hidden="true">
+      <defs>
+        <mask id="arcMask"><circle id="prog" cx="110" cy="110" r="98" fill="none" stroke="#fff" stroke-width="18"></circle></mask>
+      </defs>
+      <circle class="seg-track" cx="110" cy="110" r="98" id="segTrack"></circle>
+      <circle class="seg-on" cx="110" cy="110" r="98" id="segOn" mask="url(#arcMask)"></circle>
+      <circle class="inner" cx="110" cy="110" r="84"></circle>
+      <line class="warn-mark" id="tick"></line>
+    </svg>
+    <div class="readout">
+      <small>剩餘時間 REMAINING</small>
+      <div class="digits" id="digits" role="timer" aria-live="off">08:00</div>
+      <div class="status" id="status" aria-live="polite">準備開始</div>
+    </div>
+  </div>
+
+  <div class="ecg" aria-hidden="true">
+    <canvas id="ecg"></canvas>
+    <span>已進行 ELAPSED</span>
+    <b id="elapsed">00:00</b>
+  </div>
+
+  <div class="blocks" id="blocks" aria-hidden="true"></div>
+  <div class="legend" aria-hidden="true"><span id="legMain">作答 7′</span><span>最後 1′ 警示</span></div>
+
+  <div class="controls">
+    <button type="button" id="resetBtn">重設</button>
+    <button type="button" class="primary" id="startBtn">開始</button>
+    <button type="button" id="plusBtn">+30 秒</button>
+  </div>
+
+  <div class="opts">
+    <label><input type="checkbox" id="optSound" checked> 鈴聲</label>
+    <label><input type="checkbox" id="optVibe" checked> 震動（Android）</label>
+    <label><input type="checkbox" id="optAuto"> 結束後自動進下一輪</label>
+  </div>
+  <p class="note">剩 1 分鐘響兩短聲、畫面轉琥珀色；時間到響三長聲、全螢幕紅色警示。計時中盡量保持螢幕常亮。iPhone 請關閉靜音鍵才聽得到鈴聲。電腦可用空白鍵開始／暫停。</p>
+</div>
+
+<script>
+(() => {
+  const R = 98, C = 2 * Math.PI * R, SEGS = 96;
+  const $ = id => document.getElementById(id);
+  const prog = $('prog'), digits = $('digits'), statusEl = $('status'), startBtn = $('startBtn');
+  const segLen = C / SEGS;
+  ['segTrack', 'segOn'].forEach(id => $(id).style.strokeDasharray = (segLen * 0.62) + ' ' + (segLen * 0.38));
+  prog.style.strokeDasharray = C;
+  const reduce = matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  let total = 8 * 60000, remaining = total, endAt = 0, running = false, warned = false, ended = false;
+  let state = 'idle', wakeLock = null, audio = null;
+
+  const fmt = ms => { const s = Math.max(0, Math.ceil(ms / 1000)); return String(Math.floor(s / 60)).padStart(2, '0') + ':' + String(s % 60).padStart(2, '0'); };
+  const fmtUp = ms => { const s = Math.max(0, Math.floor(ms / 1000)); return String(Math.floor(s / 60)).padStart(2, '0') + ':' + String(s % 60).padStart(2, '0'); };
+
+  function buildScale() {
+    const mins = Math.round(total / 60000);
+    const a = 2 * Math.PI * (1 - 60000 / total);
+    const t = $('tick');
+    t.setAttribute('x1', 110 + Math.cos(a) * 86); t.setAttribute('y1', 110 + Math.sin(a) * 86);
+    t.setAttribute('x2', 110 + Math.cos(a) * 112); t.setAttribute('y2', 110 + Math.sin(a) * 112);
+    const b = $('blocks'); b.innerHTML = ''; b.style.gridTemplateColumns = 'repeat(' + mins + ', 1fr)';
+    for (let i = 0; i < mins; i++) { const d = document.createElement('div'); if (i === mins - 1) d.className = 'last'; b.appendChild(d); }
+    $('legMain').textContent = '作答 ' + (mins - 1) + '′';
+  }
+  function setState(s, label, mode) {
+    state = s; document.body.className = 'state-' + s;
+    statusEl.textContent = label; $('mode').textContent = mode;
+  }
+  function render() {
+    digits.textContent = fmt(remaining);
+    prog.style.strokeDashoffset = C * (1 - remaining / total);
+    const el = total - remaining;
+    $('elapsed').innerHTML = fmtUp(el) + '<em>/ ' + fmt(total) + '</em>';
+    const lit = Math.min(Math.floor(el / 60000) + (el > 0 ? 1 : 0), total / 60000);
+    [...$('blocks').children].forEach((d, i) => d.classList.toggle('on', i < lit));
+  }
+
+  /* sound + haptics */
+  function beep(freq, dur, when) {
+    if (!$('optSound').checked || !audio) return;
+    const o = audio.createOscillator(), g = audio.createGain();
+    o.type = 'square'; o.frequency.value = freq;
+    const t = audio.currentTime + when;
+    g.gain.setValueAtTime(0.0001, t);
+    g.gain.exponentialRampToValueAtTime(0.25, t + 0.015);
+    g.gain.setValueAtTime(0.25, t + dur - 0.03);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+    o.connect(g).connect(audio.destination); o.start(t); o.stop(t + dur + 0.05);
+  }
+  const vibe = p => { if ($('optVibe').checked && navigator.vibrate) { try { navigator.vibrate(p); } catch (e) {} } };
+  async function keepAwake() { try { if ('wakeLock' in navigator) wakeLock = await navigator.wakeLock.request('screen'); } catch (e) { wakeLock = null; } }
+  function release() { try { wakeLock && wakeLock.release(); } catch (e) {} wakeLock = null; }
+  document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && running) keepAwake(); });
+
+  /* timer */
+  function update() {
+    if (!running) return;
+    remaining = endAt - Date.now();
+    if (!warned && remaining <= 60000 && total > 60000) {
+      warned = true; setState('warn', '剩 1 分鐘', 'WARNING');
+      beep(988, .14, 0); beep(988, .14, .24); vibe([200, 120, 200]);
+    }
+    if (remaining <= 0) {
+      remaining = 0; running = false; ended = true;
+      setState('end', '時間到', 'TIME UP');
+      beep(784, .5, 0); beep(784, .5, .7); beep(784, .8, 1.4); vibe([600, 200, 600, 200, 900]);
+      startBtn.textContent = '下一輪'; release(); lockPresets(false);
+      if ($('optAuto').checked) setTimeout(() => { if (ended) { reset(); start(); } }, 3000);
+    }
+    render();
+  }
+  function start() {
+    if (!audio) { try { audio = new (window.AudioContext || window.webkitAudioContext)(); } catch (e) {} }
+    if (audio && audio.state === 'suspended') audio.resume();
+    if (ended) reset();
+    endAt = Date.now() + remaining; running = true;
+    warned ? setState('warn', '剩 1 分鐘', 'WARNING') : setState('run', '計時中', 'LIVE');
+    startBtn.textContent = '暫停'; lockPresets(true); keepAwake(); beep(1319, .08, 0);
+  }
+  function pause() {
+    remaining = endAt - Date.now(); running = false;
+    setState(warned ? 'warn' : 'idle', '已暫停', 'PAUSED'); startBtn.textContent = '繼續'; release(); render();
+  }
+  function reset() {
+    running = false; warned = false; ended = false; remaining = total;
+    setState('idle', '準備開始', 'STANDBY'); startBtn.textContent = '開始'; release(); lockPresets(false); render();
+  }
+  function lockPresets(on) { document.querySelectorAll('#presets button').forEach(b => b.disabled = on); }
+
+  startBtn.addEventListener('click', () => running ? pause() : start());
+  $('resetBtn').addEventListener('click', reset);
+  $('plusBtn').addEventListener('click', () => {
+    if (ended) return;
+    if (running) { endAt += 30000; remaining = endAt - Date.now(); } else remaining += 30000;
+    if (remaining > 60000 && warned) { warned = false; running ? setState('run', '計時中', 'LIVE') : setState('idle', '已暫停', 'PAUSED'); }
+    if (remaining > total) { total = Math.ceil(remaining / 60000) * 60000; buildScale(); }
+    render();
+  });
+  document.querySelectorAll('#presets button').forEach(b => b.addEventListener('click', () => {
+    document.querySelectorAll('#presets button').forEach(x => x.setAttribute('aria-pressed', 'false'));
+    b.setAttribute('aria-pressed', 'true');
+    total = +b.dataset.min * 60000; buildScale(); reset();
+  }));
+  document.addEventListener('keydown', e => {
+    if (e.target.tagName === 'INPUT') return;
+    if (e.code === 'Space') { e.preventDefault(); startBtn.click(); }
+    if (e.key === 'r' || e.key === 'R') reset();
+  });
+  ['stationName', 'studentName'].forEach(id => {
+    const key = 'osce-v2-' + id;
+    try { const v = localStorage.getItem(key); if (v) $(id).value = v; } catch (e) {}
+    $(id).addEventListener('input', e => { try { localStorage.setItem(key, e.target.value); } catch (err) {} });
+  });
+
+  /* ECG sweep (monitor style: a write head sweeps left→right, erasing just ahead of itself) */
+  const cv = $('ecg'), ctx = cv.getContext('2d');
+  let W = 0, H = 0, dpr = 1, ys = [], head = 0, phase = 0, last = performance.now();
+  function size() {
+    dpr = Math.min(window.devicePixelRatio || 1, 2);
+    W = Math.max(1, Math.floor(cv.clientWidth)); H = Math.max(1, Math.floor(cv.clientHeight));
+    cv.width = W * dpr; cv.height = H * dpr; ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ys = new Array(W).fill(null); head = 0;
+  }
+  const gauss = (x, m, s) => Math.exp(-((x - m) ** 2) / (2 * s * s));
+  function wave(p) {
+    return 0.12 * gauss(p, .12, .025) - 0.12 * gauss(p, .2, .008) + 1.0 * gauss(p, .225, .011)
+         - 0.28 * gauss(p, .25, .01) + 0.26 * gauss(p, .46, .045);
+  }
+  function color() { return getComputedStyle(document.body).getPropertyValue('--c').trim() || '#36f5a2'; }
+  let col = '#36f5a2', colAt = 0;
+  function frame(now) {
+    const dt = Math.min(0.1, (now - last) / 1000); last = now;
+    update();
+    const period = state === 'end' ? 0.42 : state === 'warn' && running ? 0.62 : 1.0;
+    const amp = running || state === 'end' ? 1 : 0.0;
+    const speed = W / 4; // full sweep in 4 s
+    const steps = Math.max(1, Math.round(speed * dt));
+    for (let i = 0; i < steps; i++) {
+      const before = phase;
+      phase += (dt / steps) / period;
+      if (phase >= 1) { phase -= 1; }
+      if (before < .225 && phase >= .225 && amp) { const d = $('dot'); d.classList.add('beat'); setTimeout(() => d.classList.remove('beat'), 120); }
+      const v = amp * wave(phase) + (Math.random() - .5) * 0.015;
+      ys[head] = H * 0.62 - v * H * 0.48;
+      head = (head + 1) % W;
+    }
+    if (now - colAt > 250) { col = color(); colAt = now; }
+    ctx.clearRect(0, 0, W, H);
+    ctx.lineWidth = 2; ctx.lineJoin = 'round'; ctx.strokeStyle = col;
+    ctx.shadowColor = col; ctx.shadowBlur = 8;
+    ctx.beginPath();
+    let pen = false; const gap = 14;
+    for (let x = 0; x < W; x++) {
+      const dist = (x - head + W) % W;
+      if (dist < gap || ys[x] == null) { pen = false; continue; }
+      pen ? ctx.lineTo(x, ys[x]) : ctx.moveTo(x, ys[x]); pen = true;
+    }
+    ctx.stroke();
+    ctx.shadowBlur = 0; ctx.fillStyle = col; ctx.beginPath();
+    const hy = ys[(head - 1 + W) % W]; if (hy != null) { ctx.arc((head - 1 + W) % W, hy, 3, 0, Math.PI * 2); ctx.fill(); }
+    requestAnimationFrame(frame);
+  }
+  function clock() {
+    const d = new Date();
+    $('clock').textContent = [d.getHours(), d.getMinutes(), d.getSeconds()].map(n => String(n).padStart(2, '0')).join(':');
+  }
+  window.addEventListener('resize', size);
+  size(); buildScale(); reset(); clock(); setInterval(clock, 1000);
+  setInterval(update, 250);
+  if (!reduce) requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
